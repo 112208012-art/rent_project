@@ -1,3 +1,4 @@
+from openai import OpenAI
 import streamlit as st
 import pandas as pd
 import joblib
@@ -85,67 +86,77 @@ if st.button("開始預測"):
     #shap
     shap_values = explainer.shap_values(user_df)
 
-    shap_df = pd.DataFrame({
-    "條件": user_df.columns,
-    "影響金額": shap_values[0]
-    })
-
-    shap_df["影響方向"] = shap_df["影響金額"].apply(
-    lambda x: "提高租金" if x > 0 else "降低租金"
+    #open ai
+    client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=st.secrets["OPENROUTER_API_KEY"]
     )
 
-    shap_df["絕對影響"] = shap_df["影響金額"].abs()
+    MODEL = "qwen/qwen-2.5-7b-instruct" 
 
-    shap_df = shap_df.sort_values("絕對影響", ascending=False)
-
-    st.subheader("影響租金最多的條件")
-
-    top = shap_df.iloc[0]
-
-    st.write(f"影響最大的條件是：**{top['條件']}**")
-    st.write(f"影響方向：{top['影響方向']}")
-    st.write(f"影響金額：約 {top['影響金額']:.0f} 元")
-
-    st.write("前 5 個影響租金最多的條件：")
-    st.dataframe(shap_df[["條件", "影響方向", "影響金額"]].head(5))
-
-    st.subheader("SHAP 解釋圖")
-    fig, ax = plt.subplots()
-    shap.plots.bar(
-        shap.Explanation(
-            values=shap_values[0],
-            base_values=explainer.expected_value,
-            data=user_df.iloc[0],
-            feature_names=user_df.columns
-        ),
-        show=False
+    feature_importance = dict(
+        zip(user_df.columns.tolist(), shap_values[0].tolist())
     )
 
-    st.pyplot(fig)
+    print(feature_importance)
 
+    diff = actual_rent - pred_rent
 
-    #shap結束
-
-    premium_rate = (actual_rent - pred_rent) / pred_rent
-
-    if cluster==9:
-        place=''
-
-
-    st.subheader("預測結果")
-    st.write(f"系統判斷 cluster：{cluster}")
-    st.write(f"模型預測合理租金：約 {pred_rent:,.0f} 元")
-    st.write(f"實際租金：{actual_rent:,.0f} 元")
-    st.write(f"價差比例：{premium_rate:.2%}")
-
-    if premium_rate > 0.2:
-        st.error("這間房子偏貴很多，不太值得。")
-    elif premium_rate > 0.05:
-        st.warning("這間房子有點偏貴。")
-    elif premium_rate < -0.2:
-        st.success("這間房子明顯便宜，可能很值得。")
-    elif premium_rate < -0.05:
-        st.success("這間房子略便宜，可以考慮。")
+    if diff > 0:
+        rent_judgement = "實際租金過高"
+        worth_judgement = "不值得租"
+        factor_rule = "請挑選 SHAP value 為正值的條件，說明哪些條件讓模型預測租金偏高。"
+    elif diff < 0:
+        rent_judgement = "實際租金過低"
+        worth_judgement = "值得租"
+        factor_rule = "請挑選 SHAP value 為負值的條件，說明哪些條件讓模型預測租金偏低。"
     else:
-        st.info("這間房子的租金大致合理。")
+        rent_judgement = "實際租金合理"
+        worth_judgement = "可以考慮租"
+        factor_rule = "請簡短說明主要影響條件。"
+
+    prompt = f"""
+    你是一位租金合理性分析專家。
+
+    請嚴格根據以下判斷結果回答，不可以自行更改結論。
+
+    判斷規則：
+    - 實際租金 > 預測租金：實際租金過高，不值得租
+    - 實際租金 < 預測租金：實際租金過低，值得租
+    - 實際租金 = 預測租金：租金合理，可以考慮租
+
+    本次判斷：
+    - 預測租金：{pred_rent:.0f} 元
+    - 實際租金：{actual_rent:.0f} 元
+    - 差額：{abs(diff):.0f} 元
+    - 判斷：{rent_judgement}
+    - 結論：{worth_judgement}
+
+    房型代碼：
+    1=雅房，2=分租套房，3=獨立套房，4=整層住家
+
+    房屋條件與對租金的影響：
+    {feature_importance}
+
+    分析要求：
+    {factor_rule}
+
+    請用繁體中文 50 字以內回答。
+    回答格式固定如下：
+    預測租金為X元，實際租金為Y元，相差Z元，判斷為「...」。主要原因是...。結論：...。
+    """
+
+    with st.spinner("AI 正在分析租金合理性，請稍候..."):
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+
+        text = resp.choices[0].message.content
+
+    st.subheader("AI 租金合理性分析")
+    st.write(text)
+
+
 
